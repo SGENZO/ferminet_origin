@@ -1,4 +1,3 @@
-# Lint as: python3
 # Copyright 2019 DeepMind Technologies Limited. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -53,8 +52,9 @@ class Scf:
     pyscf_mol: the PySCF 'Molecule'. If this is passed to the init,
       the molecule, nelectrons, and basis will not be used, and the
       calculations will be performed on the existing pyscf_mol
-    restricted: If true, use the restriced Hartree-Fock method, otherwise use
+    restricted: If true, use the restricted Hartree-Fock method, otherwise use
       the unrestricted Hartree-Fock method.
+    mean_field: the actual UHF object.
   """
 
   def __init__(self,
@@ -73,12 +73,15 @@ class Scf:
       self._mol = None
 
     self.restricted = restricted
-    self._mean_field = None
+    self.mean_field = None
 
     pyscf.lib.param.TMPDIR = None
 
-  def run(self):
+  def run(self, dm0: Optional[np.ndarray] = None):
     """Runs the Hartree-Fock calculation.
+
+    Args:
+      dm0: Optional density matrix to initialize the calculation.
 
     Returns:
       A pyscf scf object (i.e. pyscf.scf.rhf.RHF, pyscf.scf.uhf.UHF or
@@ -109,12 +112,17 @@ class Scf:
       if self._mol.nelectron != sum(self.nelectrons):
         raise RuntimeError('PySCF molecule not consistent with QMC molecule.')
     if self.restricted:
-      self._mean_field = pyscf.scf.RHF(self._mol)
+      self.mean_field = pyscf.scf.RHF(self._mol)
     else:
-      self._mean_field = pyscf.scf.UHF(self._mol)
-    self._mean_field.init_guess = 'atom'
-    self._mean_field.kernel()
-    return self._mean_field
+      self.mean_field = pyscf.scf.UHF(self._mol)
+    try:
+      self.mean_field.kernel(dm0=dm0)
+    except TypeError:
+      logging.info('Mean-field solver does not support specifying an initial '
+                   'density matrix.')
+      # 1e solvers (e.g. uhf.HF1e) do not take any keyword arguments.
+      self.mean_field.kernel()
+    return self.mean_field
 
   def eval_mos(self, positions: np.ndarray,
                deriv: bool = False) -> Tuple[np.ndarray, np.ndarray]:
@@ -142,12 +150,12 @@ class Scf:
       NotImplementedError: If Hartree-Fock calculation used Cartesian
         Gaussian-type orbitals as the underlying basis set.
     """
-    if self._mean_field is None:
+    if self.mean_field is None:
       raise RuntimeError('Mean-field calculation has not been run.')
     if self.restricted:
-      coeffs = (self._mean_field.mo_coeff,)
+      coeffs = (self.mean_field.mo_coeff,)
     else:
-      coeffs = self._mean_field.mo_coeff
+      coeffs = self.mean_field.mo_coeff
     # Assumes self._mol.cart (use of Cartesian Gaussian-type orbitals and
     # integrals) is False (default behaviour of pyscf).
     if self._mol.cart:

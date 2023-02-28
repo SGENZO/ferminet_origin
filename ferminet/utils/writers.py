@@ -1,4 +1,3 @@
-# Lint as: python3
 # Copyright 2018 DeepMind Technologies Limited. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -49,7 +48,7 @@ class Writer(contextlib.AbstractContextManager):
     self._log = log
 
   def __enter__(self):
-    self._file = open(self._filename, 'w')
+    self._file = open(self._filename, 'w', encoding='UTF-8')
     # write top row of csv
     if self._iteration_key:
       self._file.write(f'{self._iteration_key},')
@@ -68,7 +67,7 @@ class Writer(contextlib.AbstractContextManager):
       row.insert(0, str(t))
     for key in data:
       if key not in self._schema:
-        raise ValueError('Not a recognized key for writer: %s' % key)
+        raise ValueError(f'Not a recognized key for writer: {key}')
 
     # write the data to csv
     self._file.write(','.join(row) + '\n')

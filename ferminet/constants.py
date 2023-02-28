@@ -12,28 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Main wrapper for FermiNet in JAX."""
+"""Constants for FermiNet."""
 
-from absl import app
-from absl import flags
-from absl import logging
-from ferminet import base_config
-from ferminet import train
-from ml_collections.config_flags import config_flags
-
-# internal imports
-
-FLAGS = flags.FLAGS
-
-config_flags.DEFINE_config_file('config', None, 'Path to config file.')
+import functools
+import jax
+import kfac_jax
 
 
-def main(_):
-  cfg = FLAGS.config
-  cfg = base_config.resolve(cfg)
-  logging.info('System config:\n\n%s', cfg)
-  train.train(cfg)
+# Axis name we pmap over.
+PMAP_AXIS_NAME = 'qmc_pmap_axis'
 
+# Shortcut for jax.pmap over PMAP_AXIS_NAME. Prefer this if pmapping any
+# function which does communications or reductions.
+pmap = functools.partial(jax.pmap, axis_name=PMAP_AXIS_NAME)
 
-if __name__ == '__main__':
-  app.run(main)
+# Shortcut for kfac utils
+psum = functools.partial(kfac_jax.utils.psum_if_pmap, axis_name=PMAP_AXIS_NAME)
+pmean = functools.partial(
+    kfac_jax.utils.pmean_if_pmap, axis_name=PMAP_AXIS_NAME)

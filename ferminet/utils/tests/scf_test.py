@@ -1,4 +1,3 @@
-# Lint as: python3
 # Copyright 2019 DeepMind Technologies Limited. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -27,7 +26,7 @@ import pyscf
 class ScfTest(parameterized.TestCase):
 
   def setUp(self):
-    super(ScfTest, self).setUp()
+    super().setUp()
     # disable use of temp directory in pyscf.
     # Test calculations are small enough to fit in RAM and we don't need
     # checkpoint files.
@@ -95,7 +94,7 @@ class ScfTest(parameterized.TestCase):
     mo_vals = hf.eval_mos(xs)
     self.assertLen(mo_vals, 2)  # alpha-spin orbitals and beta-spin orbitals.
     for spin_mo_vals in mo_vals:
-      # Evalute npts points on M orbitals/functions - (npts, M) array.
+      # Evaluate npts points on M orbitals/functions - (npts, M) array.
       self.assertEqual(spin_mo_vals.shape, (npts, hf._mol.nao_nr()))
 
 
