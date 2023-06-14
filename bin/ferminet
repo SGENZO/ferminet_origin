@@ -32,7 +32,7 @@ def main(_):
   cfg = FLAGS.config
   cfg = base_config.resolve(cfg)
   logging.info('System config:\n\n%s', cfg)
-  train.train(cfg)
+  # train.train(cfg)
 
 
 if __name__ == '__main__':

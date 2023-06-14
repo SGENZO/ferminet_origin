@@ -54,7 +54,9 @@ def default() -> ml_collections.ConfigDict:
       'config_module': __name__,
       'optim': {
           'iterations': 1000000,  # number of iterations
-          'optimizer': 'kfac',  # one of adam, kfac, lamb, none
+          'iterations_psi': 5,  # psi的内循环步数
+          'iterations_phi': 5,  # phi的内循环步数
+          'optimizer': 'adam',  # one of adam, kfac, lamb, none
           'lr': {
               'rate': 0.05,  # learning rate
               'decay': 1.0,  # exponent of learning rate decay
@@ -89,10 +91,14 @@ def default() -> ml_collections.ConfigDict:
           'save_frequency': 10.0,  # minutes between saving network params
           # Path to save/restore network to/from. If falsy,
           # creates a timestamped directory in the working directory.
-          'save_path': '',
+          'save_path_psi': '',
+          'save_path_phi': '',
+          'save_path-previous': '',
           # Path containing checkpoint to restore network from.
           # Ignored if falsy or save_path contains a checkpoint.
-          'restore_path': '',
+          'restore_path_psi': '',
+          'restore_path_phi': '',
+          'restore_path_previous': '',
           # Remaining log options are currently not functional.  Whether or not
           # to log the values of all walkers every iteration Use with caution!!!
           # Produces a lot of data very quickly.
