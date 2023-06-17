@@ -1,0 +1,1 @@
+converged SCF energy = -0.47103905418349  <S^2> = 0.75  2S+1 = 2

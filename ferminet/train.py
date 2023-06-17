@@ -123,7 +123,8 @@ class OptUpdate(Protocol):
       params_previous: network parameters.
       data_psi: electron positions.
       data_phi: electron positions.
-      opt_state: optimizer internal state.
+      opt_state_psi: optimizer internal state for psi.
+      opt_state_phi: optimizer internal state for phi.
       key: RNG state.
 
     Returns:
@@ -135,7 +136,7 @@ class OptUpdate(Protocol):
 
 StepResults = Tuple[jnp.ndarray, jnp.ndarray,  # data_psi 和 data_phi
                     networks.ParamTree, networks.ParamTree,  # params_psi 和 params_phi
-                    Optional[optax.OptState],  Optional[optax.OptState],  # OptState
+                    Optional[optax.OptState], Optional[optax.OptState],  # OptState
                     jnp.ndarray, qmc_loss_functions.AuxiliaryLossData,  # loss, aux_data
                     jnp.ndarray, jnp.ndarray]  # pmove_psi, pmove_phi
 
@@ -156,11 +157,16 @@ class Step(Protocol):
         """Performs one set of MCMC moves and an optimization step.
 
     Args:
-      data: batch of MCMC configurations.
-      params: network parameters.
-      state: optimizer internal state.
+      data_psi: batch of MCMC configurations.
+      data_phi: batch of MCMC configurations.
+      params_psi: network parameters.
+      params_phi: network parameters.
+      params_previous: network parameters.
+      state_psi: optimizer internal state.
+      state_phi: optimizer internal state.
       key: JAX RNG state.
-      mcmc_width: width of MCMC move proposal. See mcmc.make_mcmc_step.
+      mcmc_width_psi: width of MCMC move proposal. See mcmc.make_mcmc_step.
+      mcmc_width_phi: width of MCMC move proposal. See mcmc.make_mcmc_step.
 
     Returns:
       Tuple of (data, params, state, loss, aux_data, pmove).
@@ -263,7 +269,7 @@ def make_training_step(
         mcmc_step,
         optimizer_step: OptUpdate,
 ) -> Step:
-    """Factory to create traning step for non-KFAC optimizers.
+    """Factory to create training step for non-KFAC optimizers.
 
   Args:
     mcmc_step: Callable which performs the set of MCMC steps. See make_mcmc_step
@@ -277,7 +283,7 @@ def make_training_step(
   """
 
     # 这个修饰是干啥的
-    #@functools.partial(constants.pmap, donate_argnums=(0, 1, 2, 3, 4, 5, 6))
+    # @functools.partial(constants.pmap, donate_argnums=(0, 1, 2, 3, 4, 5, 6))
     @constants.pmap
     def step(data_psi: jnp.ndarray, data_phi: jnp.ndarray,
              params_psi: networks.ParamTree, params_phi: networks.ParamTree, params_previous: networks.ParamTree,
@@ -298,25 +304,26 @@ def make_training_step(
         new_params_psi, new_params_phi, state_psi, state_phi, loss, aux_data = \
             optimizer_step(params_psi, data_psi, params_phi, data_phi, params_previous, state_psi, state_phi, loss_key)
 
-        result: Tuple
-        result = [data_psi, data_phi,
-                  new_params_psi, new_params_phi,
-                  state_psi, state_phi,
-                  loss, aux_data, pmove_psi, pmove_phi]
-        return result
+        return data_psi, data_phi, new_params_psi, new_params_phi, state_psi, state_phi, \
+               loss, aux_data, pmove_psi, pmove_phi
 
     return step
 
 
 def make_kfac_training_step(mcmc_step, damping: float,
-                            optimizer: kfac_jax.Optimizer) -> Step:
+                            optimizer_psi: kfac_jax.Optimizer,
+                            optimizer_phi: kfac_jax.Optimizer,
+                            iteration_psi: int, iteration_phi: int) -> Step:
     """Factory to create training step for KFAC optimizers.
 
   Args:
+    iteration_psi: 内循环步数psi
+    iteration_phi: 内循环步数phi
     mcmc_step: Callable which performs the set of MCMC steps. See make_mcmc_step
       for creating the callable.
     damping: value of damping to use for each KFAC update step.
-    optimizer: KFAC optimizer instance.
+    optimizer_psi: KFAC optimizer instance.
+    optimizer_phi: KFAC optimizer instance.
 
   Returns:
     step, a callable which performs a set of MCMC steps and then an optimization
@@ -329,40 +336,46 @@ def make_kfac_training_step(mcmc_step, damping: float,
 
     def step(data_psi: jnp.ndarray, data_phi: jnp.ndarray,
              params_psi: networks.ParamTree, params_phi: networks.ParamTree, params_previous: networks.ParamTree,
-             state: kfac_jax.optimizer.OptimizerState,
-             key: chex.PRNGKey, mcmc_width: jnp.ndarray) -> StepResults:
+             state_psi: kfac_jax.optimizer.OptimizerState,
+             state_phi: kfac_jax.optimizer.OptimizerState,
+             key: chex.PRNGKey,
+             mcmc_width_psi: jnp.ndarray,
+             mcmc_width_phi: jnp.ndarray) -> StepResults:
         """A full update iteration for KFAC: MCMC steps + optimization."""
         # KFAC requires control of the loss and gradient eval, so everything called
         # here must be already pmapped.
 
         # MCMC loop for psi
+        global stats
         mcmc_keys, loss_keys = kfac_jax.utils.p_split(key)
-        new_data_psi, pmove_psi = mcmc_step(params_psi, data_psi, mcmc_keys, mcmc_width)
+        new_data_psi, pmove_psi = mcmc_step(params_psi, data_psi, mcmc_keys, mcmc_width_psi)
 
         # Optimization step
-        new_params_psi, state, stats = optimizer.step(
-            params=params_psi,
-            state=state,
-            rng=loss_keys,
-            data_iterator=iter([new_data_psi]),
-            momentum=shared_mom,
-            damping=shared_damping)
+        for k in range(iteration_psi):
+            params_psi, state_psi, stats = optimizer_psi.step(
+                params=params_psi,
+                state=state_psi,
+                rng=loss_keys,
+                data_iterator=iter([new_data_psi]),
+                momentum=shared_mom,
+                damping=shared_damping)
 
         # MCMC loop for phi
         mcmc_keys, loss_keys = kfac_jax.utils.p_split(key)
-        new_data_phi, pmove_phi = mcmc_step(params_phi, data_phi, mcmc_keys, mcmc_width)
+        new_data_phi, pmove_phi = mcmc_step(params_phi, data_phi, mcmc_keys, mcmc_width_phi)
 
         # Optimization step
-        new_params_phi, state, stats = optimizer.step(
-            params=params_phi,
-            state=state,
-            rng=loss_keys,
-            data_iterator=iter([new_data_phi]),
-            momentum=shared_mom,
-            damping=shared_damping)
+        for k in range(iteration_phi):
+            params_phi, state_phi, stats = optimizer_phi.step(
+                params=params_phi,
+                state=state_phi,
+                rng=loss_keys,
+                data_iterator=iter([new_data_phi]),
+                momentum=shared_mom,
+                damping=shared_damping)
 
-        return new_data_psi, new_data_phi, new_params_psi, new_params_phi, \
-               state, stats['loss'], stats['aux'], pmove_psi, pmove_psi
+        return new_data_psi, new_data_phi, params_psi, params_phi, \
+               state_psi, state_phi, stats['loss'], stats['aux'], pmove_psi, pmove_psi
 
     return step
 
@@ -409,7 +422,7 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
         seed = int(multi_host.broadcast_to_hosts(seed))
     key = jax.random.PRNGKey(seed)
 
-    # Create parameters, network, and vmaped/pmaped derivations
+    # Create parameters, network, and vmapped/pmapped derivations
 
     if cfg.pretrain.method == 'direct_init' or (
             cfg.pretrain.method == 'hf' and cfg.pretrain.iterations > 0):
@@ -419,7 +432,7 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
             nspins=nspins,
             restricted=False,
             basis=cfg.pretrain.basis)
-        # broadcast the result of PySCF from host 0 to all other hosts
+        # broadcast the result of PySCF from host 0 to all others hosts
         hartree_fock.mean_field.mo_coeff = tuple([
             multi_host.broadcast_to_hosts(x)
             for x in hartree_fock.mean_field.mo_coeff
@@ -584,6 +597,9 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
             scf_approx=hartree_fock,
             iterations=cfg.pretrain.iterations)
 
+    # 这里写一个判断，从ckpt中读取previous
+    params_previous = params_psi
+
     # Main training
 
     # Construct MCMC step
@@ -653,12 +669,12 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
             optax.scale_by_schedule(learning_rate_schedule),
             optax.scale(1))
     elif cfg.optim.optimizer == 'kfac':
-        # Differentiate wrt parameters (argument 0)
-        val_and_grad_theta = jax.value_and_grad(evaluate_loss, argnums=0, has_aux=True)
-        val_and_grad_eta = jax.value_and_grad(evaluate_loss, argnums=1, has_aux=True)
-        val_and_grad = val_and_grad_theta + val_and_grad_eta
-        optimizer = kfac_jax.Optimizer(
-            val_and_grad,
+        # Differentiate wrt parameters of psi (argument 0)
+        evaluate_loss_psi = lambda params, keys, data: \
+            evaluate_loss(params, params_phi, params_previous, keys, data, data_phi)
+        val_and_grad_psi = jax.value_and_grad(evaluate_loss_psi, argnums=0, has_aux=True)
+        optimizer_psi = kfac_jax.Optimizer(
+            val_and_grad_psi,
             l2_reg=cfg.optim.kfac.l2_reg,
             norm_constraint=cfg.optim.kfac.norm_constraint,
             value_func_has_aux=True,
@@ -677,37 +693,71 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
             ),
             # debug=True
         )
+        # Differentiate wrt parameters of phi (argument 1)
+        # 这里的optimizer_phi需要改成做梯度上升
+        evaluate_loss_phi = lambda params, keys, data: \
+            evaluate_loss(params_psi, params, params_previous, keys, data_psi, data)
+        val_and_grad_phi = jax.value_and_grad(evaluate_loss_phi, argnums=0, has_aux=True)
+        optimizer_phi = kfac_jax.Optimizer(
+            val_and_grad_phi,
+            l2_reg=cfg.optim.kfac.l2_reg,
+            norm_constraint=cfg.optim.kfac.norm_constraint,
+            value_func_has_aux=True,
+            value_func_has_rng=True,
+            learning_rate_schedule=learning_rate_schedule, #这里的lrs能直接乘以-1吗
+            curvature_ema=cfg.optim.kfac.cov_ema_decay,
+            inverse_update_period=cfg.optim.kfac.invert_every,
+            min_damping=cfg.optim.kfac.min_damping,
+            num_burnin_steps=0,
+            register_only_generic=cfg.optim.kfac.register_only_generic,
+            estimation_mode='fisher_exact',
+            multi_device=True,
+            pmap_axis_name=constants.PMAP_AXIS_NAME,
+            auto_register_kwargs=dict(
+                graph_patterns=curvature_tags_and_blocks.GRAPH_PATTERNS,
+            ),
+            # debug=True
+        )
         sharded_key, subkeys = kfac_jax.utils.p_split(sharded_key)
-        opt_state = optimizer.init(params_psi, subkeys, data_psi)
-        opt_state = opt_state_ckpt_psi or opt_state  # avoid overwriting ckpted state
+        opt_state_psi = optimizer_psi.init(params_psi, subkeys, data_psi)
+        opt_state_psi = opt_state_ckpt_psi or opt_state_psi  # avoid overwriting ckpted state
+        opt_state_phi = optimizer_phi.init(params_phi, subkeys, data_phi)
+        opt_state_phi = opt_state_ckpt_phi or opt_state_phi  # avoid overwriting ckpted state
     else:
         raise ValueError(f'Not a recognized optimizer: {cfg.optim.optimizer}')
 
     # 定义内循环步数
     k_psi = cfg.optim.iterations_psi
     k_phi = cfg.optim.iterations_phi
-    if not optimizer:
+    if not optimizer_phi and not optimizer_phi:
         opt_state_psi = None
         opt_state_phi = None
         step = make_training_step(
             mcmc_step=mcmc_step,
             optimizer_step=make_loss_step(evaluate_loss))
-    elif isinstance(optimizer, optax.GradientTransformation):
+    elif isinstance(optimizer_psi, optax.GradientTransformation) and isinstance(optimizer_phi,
+                                                                                optax.GradientTransformation):
         # optax/optax-compatible optimizer (ADAM, LAMB, ...)
         opt_state_psi = jax.pmap(optimizer_psi.init)(params_psi)
         opt_state_psi = opt_state_ckpt_psi or opt_state_psi  # avoid overwriting ckpted state
         opt_state_phi = jax.pmap(optimizer_phi.init)(params_phi)
-        opt_state_phi = opt_state_ckpt_psi or opt_state_phi  # avoid overwriting ckpted state
+        opt_state_phi = opt_state_ckpt_phi or opt_state_phi  # avoid overwriting ckpted state
         step = make_training_step(
             mcmc_step=mcmc_step,
             optimizer_step=make_opt_update_step(evaluate_loss, optimizer_psi, optimizer_phi, k_psi, k_phi))
-    elif isinstance(optimizer, kfac_jax.Optimizer): # kfac还没改
+    elif isinstance(optimizer_psi, kfac_jax.Optimizer) and isinstance(optimizer_phi, kfac_jax.Optimizer):  # kfac还没改
+        #sharded_key, subkeys = kfac_jax.utils.p_split(sharded_key)
+        #opt_state_psi = jax.pmap(optimizer_psi.init)(params_psi, subkeys, data_psi)
+        #opt_state_psi = opt_state_ckpt_psi or opt_state_psi  # avoid overwriting ckpted state
+        #opt_state_phi = jax.pmap(optimizer_phi.init)(params_phi, subkeys, data_phi)
+        #opt_state_phi = opt_state_ckpt_phi or opt_state_phi  # avoid overwriting ckpted state
         step = make_kfac_training_step(
             mcmc_step=mcmc_step,
             damping=cfg.optim.kfac.damping,
-            optimizer=optimizer)
+            optimizer_psi=optimizer_psi,
+            optimizer_phi=optimizer_phi)
     else:
-        raise ValueError(f'Unknown optimizer: {optimizer}')
+        raise ValueError(f'Unknown optimizer: {optimizer_psi}' f'Unknown optimizer: {optimizer_phi}')
 
     # psi的mcmc步长设置
     if mcmc_width_ckpt_psi is not None:
@@ -725,8 +775,6 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
     pmoves_psi = np.zeros(cfg.mcmc.adapt_frequency)
     pmoves_phi = np.zeros(cfg.mcmc.adapt_frequency)
 
-    # 这里写一个判断，从ckpt中读取previous
-    params_previous = params_psi
 
     if t_init == 0:
         logging.info('Burning in MCMC chain for %d steps', cfg.mcmc.burn_in)
@@ -750,14 +798,14 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
         logging.info('Completed burn-in MCMC steps')
         sharded_key, subkeys = kfac_jax.utils.p_split(sharded_key)
         ptotal_energy = constants.pmap(evaluate_loss)
-        initial_energy, _ = ptotal_energy(params_psi, params_psi, params_previous, \
+        initial_energy, _ = ptotal_energy(params_psi, params_psi, params_previous,
                                           subkeys, data_psi, data_phi)
         logging.info('Initial energy: %03.4f E_h', initial_energy[0])
 
     time_of_last_ckpt = time.time()
     weighted_stats = None
-
-    if cfg.optim.optimizer == 'none' and opt_state_ckpt_psi is not None: #这里需要仔细看一下,还没改
+    # 目前到这没有问题
+    if cfg.optim.optimizer == 'none' and opt_state_ckpt_psi is not None:  # 这里需要仔细看一下,还没改
         # If opt_state_ckpt is None, then we're restarting from a previous inference
         # run (most likely due to preemption) and so should continue from the last
         # iteration in the checkpoint. Otherwise, starting an inference run from a
@@ -779,14 +827,14 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
         for t in range(t_init, cfg.optim.iterations):
             sharded_key, subkeys = kfac_jax.utils.p_split(sharded_key)
             data_psi, data_phi, params_psi, params_phi, \
-            opt_state_psi, opt_state_phi, loss, unused_aux_data, \
-            pmove_psi, pmove_phi = step(
-                data_psi, data_phi,
-                params_psi, params_phi, params_previous,
-                opt_state_psi, opt_state_phi,
-                subkeys,
-                mcmc_width_psi,
-                mcmc_width_phi)
+                opt_state_psi, opt_state_phi, loss, unused_aux_data, \
+                pmove_psi, pmove_phi = step(
+                    data_psi, data_phi,
+                    params_psi, params_phi, params_previous,
+                    opt_state_psi, opt_state_phi,
+                    subkeys,
+                    mcmc_width_psi,
+                    mcmc_width_phi)
 
             # due to pmean, loss, and pmove should be the same across
             # devices.
@@ -816,14 +864,14 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
             if cfg.debug.check_nan:
                 tree = {'params_psi': params_psi, 'params_phi': params_phi, 'loss': loss}
                 if cfg.optim.optimizer != 'none':
-                    tree['optim'] = opt_state
+                    tree['optim'] = opt_state_psi
                 chex.assert_tree_all_finite(tree)
 
             # Logging
             if t % cfg.log.stats_frequency == 0:
                 logging.info(
-                    'Step %05d: %03.4f E_h, exp. variance=%03.4f E_h^2, pmove=%0.2f', t,
-                    loss, weighted_stats.variance, pmove_psi, pmove_phi)
+                    'Step %05d: %03.4f E_h, exp. variance=%03.4f E_h^2, pmove_psi=%0.2f, pmove_phi=%0.2f',
+                    t, loss, weighted_stats.variance, pmove_psi, pmove_phi)
                 writer.write(
                     t,
                     step=t,
@@ -835,8 +883,8 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
 
             # Checkpointing
             if time.time() - time_of_last_ckpt > cfg.log.save_frequency * 60:
-                checkpoint.save(ckpt_save_path_psi, t, data_psi, params_psi, \
+                checkpoint.save(ckpt_save_path_psi, t, data_psi, params_psi,
                                 opt_state_psi, mcmc_width_psi)
-                checkpoint.save(ckpt_save_path_phi, t, data_phi, params_phi, \
+                checkpoint.save(ckpt_save_path_phi, t, data_phi, params_phi,
                                 opt_state_phi, mcmc_width_phi)
                 time_of_last_ckpt = time.time()
