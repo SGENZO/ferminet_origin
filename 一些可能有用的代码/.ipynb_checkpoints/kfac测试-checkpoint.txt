@@ -1,0 +1,70 @@
+
+# 接在optimizer生成器后面
+    elif cfg.optim.optimizer == 'kfac':
+        # Differentiate wrt parameters of psi (argument 0)
+
+        evaluate_loss_psi = lambda params, keys, data: \
+            evaluate_loss(params, params_phi, params_previous, keys, data, data_phi)
+        val_and_grad_psi = jax.value_and_grad(evaluate_loss_psi, argnums=0, has_aux=True)
+        evaluate_loss_phi = lambda params, keys, data: \
+            evaluate_loss(params_psi, params, params_previous, keys, data_psi, data)
+        val_and_grad_phi = jax.value_and_grad(evaluate_loss_phi, argnums=0, has_aux=True)
+        optimizer_psi = kfac_jax.Optimizer(
+            val_and_grad_psi,
+            l2_reg=cfg.optim.kfac.l2_reg,
+            norm_constraint=cfg.optim.kfac.norm_constraint,
+            value_func_has_aux=True,
+            value_func_has_rng=True,
+            learning_rate_schedule=learning_rate_schedule,
+            curvature_ema=cfg.optim.kfac.cov_ema_decay,
+            inverse_update_period=cfg.optim.kfac.invert_every,
+            min_damping=cfg.optim.kfac.min_damping,
+            num_burnin_steps=0,
+            register_only_generic=cfg.optim.kfac.register_only_generic,
+            estimation_mode='fisher_exact',
+            multi_device=True,
+            pmap_axis_name=constants.PMAP_AXIS_NAME,
+            auto_register_kwargs=dict(
+                graph_patterns=curvature_tags_and_blocks.GRAPH_PATTERNS,
+            ),
+            # debug=True
+        )
+        optimizer_phi = kfac_jax.Optimizer(
+            val_and_grad_phi,
+            l2_reg=cfg.optim.kfac.l2_reg,
+            norm_constraint=cfg.optim.kfac.norm_constraint,
+            value_func_has_aux=True,
+            value_func_has_rng=True,
+            learning_rate_schedule=learning_rate_schedule, #这里的lrs能直接乘以-1吗
+            curvature_ema=cfg.optim.kfac.cov_ema_decay,
+            inverse_update_period=cfg.optim.kfac.invert_every,
+            min_damping=cfg.optim.kfac.min_damping,
+            num_burnin_steps=0,
+            register_only_generic=cfg.optim.kfac.register_only_generic,
+            estimation_mode='fisher_exact',
+            multi_device=True,
+            pmap_axis_name=constants.PMAP_AXIS_NAME,
+            auto_register_kwargs=dict(
+                graph_patterns=curvature_tags_and_blocks.GRAPH_PATTERNS,
+            ),
+            # debug=True
+        )
+        sharded_key, subkeys = kfac_jax.utils.p_split(sharded_key)
+        print('#### before opt init', data_psi.shape)
+        opt_state_psi = optimizer_psi.init(params_psi, subkeys, data_psi)
+        opt_state_psi = opt_state_ckpt_psi or opt_state_psi  # avoid overwriting ckpted state
+        # Differentiate wrt parameters of phi (argument 1)
+        # 这里的optimizer_phi需要改成做梯度上升
+        print('#### before phi opt init', data_phi.shape)
+        sharded_key, subkeys = kfac_jax.utils.p_split(sharded_key)
+        opt_state_phi = optimizer_phi.init(params_phi, subkeys, data_phi)
+        opt_state_phi = opt_state_ckpt_phi or opt_state_phi  # avoid overwriting ckpted state
+
+
+# 接在用optimizer生成step后面
+    elif isinstance(optimizer_psi, kfac_jax.Optimizer) and isinstance(optimizer_phi, kfac_jax.Optimizer):  # kfac还没改
+        step = make_kfac_training_step(
+            mcmc_step=mcmc_step,
+            damping=cfg.optim.kfac.damping,
+            optimizer_psi=optimizer_psi,
+            optimizer_phi=optimizer_phi)

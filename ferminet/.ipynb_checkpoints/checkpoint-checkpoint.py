@@ -93,7 +93,7 @@ def get_restore_path(restore_path: Optional[str] = None) -> Optional[str]:
     ckpt_restore_path = None
   return ckpt_restore_path
 
-# 这里可以再加一个外循环的时间步timestep
+
 def save(save_path: str, t: int, data, params, opt_state, mcmc_width) -> str:
   """Saves checkpoint information to a npz file.
 
