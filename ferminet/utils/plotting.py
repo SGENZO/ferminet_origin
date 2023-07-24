@@ -15,8 +15,8 @@ def save_plot(path: Optional[str],
               params: networks.ParamTree,
               batch_network: networks.LogFermiNetLike):
 
-    xx = np.arange(-5, 5, 0.5)
-    yy = np.arange(-5, 5, 0.5)
+    xx = np.arange(-10, 10, 0.2)
+    yy = np.arange(-10, 10, 0.2)
     X, Y = np.meshgrid(xx, yy)
     m,n = X.shape
     Xi = X.reshape(m*n, 1)

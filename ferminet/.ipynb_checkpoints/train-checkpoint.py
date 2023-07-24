@@ -28,10 +28,12 @@ from ferminet import envelopes
 from ferminet import hamiltonian
 from ferminet import loss as qmc_loss_functions
 from ferminet.ibc import gaussian
+from ferminet.ibc import orbital_200
 from ferminet import initial_loss as initial_loss_functions
 from ferminet import mcmc
 from ferminet import networks
 from ferminet import pretrain
+from ferminet import energy as comp_loss_functions
 from ferminet.utils import multi_host
 from ferminet.utils import statistics
 from ferminet.utils import system
@@ -973,6 +975,10 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
         network,
         local_energy,
         clip_local_energy=cfg.optim.clip_el)
+    energy = comp_loss_functions.make_loss(
+        network,
+        local_energy,
+        clip_local_energy=cfg.optim.clip_el)
 
     # Compute the learning rate
     def learning_rate_schedule(t_: jnp.ndarray) -> jnp.ndarray:
@@ -1088,10 +1094,13 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
                     mcmc_width_phi=mcmc_width_phi)
             logging.info('Completed burn-in MCMC steps')
             sharded_key, subkeys = kfac_jax.utils.p_split(sharded_key)
-            ptotal_energy = constants.pmap(evaluate_loss)
-            initial_energy, _ = ptotal_energy(params_psi, params_psi, params_previous,
+            wan_loss = constants.pmap(evaluate_loss)
+            psi_energy = constants.pmap(energy)
+            initial_loss, _ = wan_loss(params_psi, params_psi, params_previous,
                                               subkeys, data_psi, data_phi)
-            logging.info('Initial energy: %03.4f E_h', initial_energy[0])
+            initial_energy = psi_energy(params_psi, subkeys, data_psi)
+            logging.info('Initial energy: %03.4f E_h', initial_energy[0])            
+            logging.info('Initial loss: %03.4f', initial_loss[0])
     
         time_of_last_ckpt = time.time()
         weighted_stats = None
@@ -1161,7 +1170,7 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
                 # Logging
                 if t % cfg.log.stats_frequency == 0:
                     logging.info(
-                        'Step %05d: %03.4f E_h, exp. variance=%03.4f E_h^2, pmove_psi=%0.2f, pmove_phi=%0.2f',
+                        'Step %05d: %03.4f loss, exp. variance=%03.4f, pmove_psi=%0.2f, pmove_phi=%0.2f',
                         t, loss, weighted_stats.variance, pmove_psi, pmove_phi)
                     writer.write(
                         t,
@@ -1178,7 +1187,13 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
                                     opt_state_psi, mcmc_width_psi)
                     checkpoint.save(ckpt_save_path_phi, t, data_phi, params_phi,
                                     opt_state_phi, mcmc_width_phi)
-                    time_of_last_ckpt = time.time()        
+                    time_of_last_ckpt = time.time() 
+
+                if t%100 == 0:
+                    checkpoint.save(ckpt_save_path_psi, t, data_psi, params_psi,
+                                    opt_state_psi, mcmc_width_psi)
+                    checkpoint.save(ckpt_save_path_phi, t, data_phi, params_phi,
+                                    opt_state_phi, mcmc_width_phi)
 
     ###################################################
 
@@ -1199,6 +1214,10 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
     _, _, params_phi, _, _ = checkpoint.restore(ckpt_restore_filename_previous, host_batch_size)
 
     wan_training()
+
+    psi_energy = constants.pmap(energy)
+    initial_energy = psi_energy(params_psi, subkeys, data_psi)
+    logging.info('energy: %03.4f E_h', initial_energy[0])     
 
     # 保存最后的ckpt
     checkpoint.save(ckpt_save_path_psi, cfg.optim.iterations, data_psi, params_psi,
@@ -1257,6 +1276,10 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
         pmoves_phi = np.zeros(cfg.mcmc.adapt_frequency)
 
         wan_training()
+
+        initial_energy = psi_energy(params_psi, subkeys, data_psi)
+        logging.info('energy: %03.4f E_h', initial_energy[0])            
+
 
         # 保存最后的ckpt
         checkpoint.save(ckpt_save_path_psi, cfg.optim.iterations, data_psi, params_psi,

@@ -21,6 +21,7 @@ from ferminet import constants
 from ferminet import hamiltonian
 from ferminet import networks
 import jax
+import scipy
 import jax.numpy as jnp
 import kfac_jax
 from typing_extensions import Protocol
@@ -40,6 +41,8 @@ class AuxiliaryLossData:
   local_for_psi_cross: jnp.DeviceArray
   local_for_phi: jnp.DeviceArray
   local_for_phi_cross: jnp.DeviceArray
+  local_pre_psi: jnp.DeviceArray
+  local_pre_phi: jnp.DeviceArray
 
 
 class LossFn(Protocol):
@@ -97,7 +100,10 @@ def make_loss(network: networks.LogFermiNetLike,
   batch_network = jax.vmap(network, in_axes=(None, 0), out_axes=0)
 
   # h = T/N 时间步长
-  h = 0.1
+  h_origin = 0.1
+  # hbar = scipy.constants.hbar
+  hbar = 1
+  h = h_origin/hbar
 
   @jax.custom_jvp
   def total_energy(
@@ -133,28 +139,39 @@ def make_loss(network: networks.LogFermiNetLike,
     psi_cross = batch_network(params_psi, data_phi)
     phi = batch_network(params_phi, data_phi)
     phi_cross = batch_network(params_phi, data_psi)
-    u_psi = batch_network(params_previous, data_psi)
-    u_phi = batch_network(params_previous, data_phi)
+    previous_psi = batch_network(params_previous, data_psi)
+    previous_phi = batch_network(params_previous, data_phi)
+    e_l_pre_psi = batch_local_energy(params_previous, keys_psi, data_psi)
+    e_l_pre_phi = batch_local_energy(params_previous, keys_phi, data_phi)
+      
+    u_psi = -(h/2 * e_l_pre_psi * jnp.exp(previous_psi) + 1j * jnp.exp(previous_psi))
+    u_phi = -(h/2 * e_l_pre_phi * jnp.exp(previous_phi) + 1j * jnp.exp(previous_phi))
+    u_psi = jnp.log(u_psi)
+    u_phi = jnp.log(u_phi)
 
     e_l_psi = batch_local_energy(params_psi, keys_psi, data_psi)
     e_l_psi_cross = batch_local_energy(params_psi, keys_psi, data_phi)
     e_l_phi = batch_local_energy(params_phi, keys_phi, data_phi)
     e_l_phi_cross = batch_local_energy(params_phi, keys_phi, data_psi)
 
-    # 从这里开始先忽略复数，测试成功后再加入复单位
+    # 已经加入1j
     part_1 = h/2 * jnp.exp(psi_cross - phi) * e_l_psi_cross - \
-             jnp.exp(psi_cross - phi) - jnp.exp(u_phi - phi)
+             1j * jnp.exp(psi_cross - phi) - jnp.exp(u_phi - phi)
     part_2 = h/2 * jnp.exp(phi_cross - psi) * e_l_phi_cross + \
-             jnp.exp(phi_cross - psi) - jnp.exp(phi_cross + u_psi - 2 * psi)
+             1j * jnp.exp(phi_cross - psi) - jnp.exp(phi_cross + jnp.conj(u_psi) - psi - jnp.conj(psi))
 
     e_l = part_1 * part_2
     loss = constants.pmean(jnp.mean(e_l))
+    loss = jnp.real(loss)
 
     # 注意这个variance是没有统计学意义的
     variance = constants.pmean(jnp.mean((e_l - loss)**2))
+    variance = jnp.real(variance)
+      
     return loss, AuxiliaryLossData(variance=variance, local_energy=e_l,
                                    local_for_psi=e_l_psi, local_for_psi_cross=e_l_psi_cross,
-                                   local_for_phi=e_l_phi, local_for_phi_cross=e_l_phi_cross)
+                                   local_for_phi=e_l_phi, local_for_phi_cross=e_l_phi_cross,
+                                   local_pre_psi=e_l_pre_psi, local_pre_phi=e_l_pre_phi)
 
   @total_energy.defjvp
   def total_energy_jvp(primals, tangents):  # pylint: disable=unused-variable
@@ -181,13 +198,20 @@ def make_loss(network: networks.LogFermiNetLike,
     psi_cross = batch_network(params_psi, data_phi)
     phi = batch_network(params_phi, data_phi)
     phi_cross = batch_network(params_phi, data_psi)
-    u_psi = batch_network(params_previous, data_psi)
-    u_phi = batch_network(params_previous, data_phi)
+    previous_psi = batch_network(params_previous, data_psi)
+    previous_phi = batch_network(params_previous, data_phi)
+    e_l_pre_psi = aux_data.local_pre_psi
+    e_l_pre_phi = aux_data.local_pre_phi
+      
+    u_psi = -(h/2 * e_l_pre_psi * jnp.exp(previous_psi) + 1j * jnp.exp(previous_psi))
+    u_phi = -(h/2 * e_l_pre_phi * jnp.exp(previous_phi) + 1j * jnp.exp(previous_phi))
+    u_psi = jnp.log(u_psi)
+    u_phi = jnp.log(u_phi)
 
-    part_1 = h / 2 * jnp.exp(psi_cross - phi) * e_l_psi_cross - \
-             jnp.exp(psi_cross - phi) - jnp.exp(u_phi - phi)
-    part_2 = h / 2 * jnp.exp(phi_cross - psi) * e_l_phi_cross + \
-             jnp.exp(phi_cross - psi) - jnp.exp(phi_cross + u_psi - 2 * psi)
+    part_1 = h/2 * jnp.exp(psi_cross - phi) * e_l_psi_cross - \
+             1j * jnp.exp(psi_cross - phi) - jnp.exp(u_phi - phi)
+    part_2 = h/2 * jnp.exp(phi_cross - psi) * e_l_phi_cross + \
+             1j * jnp.exp(phi_cross - psi) - jnp.exp(phi_cross + jnp.conj(u_psi) - psi - jnp.conj(psi))
 
     # Due to the simultaneous requirements of KFAC (calling convention must be
     # (params, rng, data)) and Laplacian calculation (only want to take
@@ -212,28 +236,30 @@ def make_loss(network: networks.LogFermiNetLike,
     kfac_jax.register_normal_predictive_distribution(psi_primal[:, None])
     kfac_jax.register_normal_predictive_distribution(phi_primal[:, None])
 
-    part_3 = psi_tangent
-    part_4 = phi_tangent
-    part_5 = e_l_phi * jnp.exp(psi_cross - phi) * psi_cross_tangent
-    part_6 = e_l_phi_cross * jnp.exp(phi_cross - psi) * psi_tangent
+    part_3 = jnp.conj(psi_tangent)
+    part_4 = jnp.conj(phi_tangent)
+    part_5 = jnp.conj(e_l_phi) * jnp.exp(psi_cross - phi) * psi_cross_tangent
+    part_6 = jnp.conj(e_l_phi_cross) * jnp.conj(jnp.exp(phi_cross - psi)) * psi_tangent
     part_7 = jnp.exp(psi_cross - phi) * psi_cross_tangent
-    part_8 = jnp.exp(phi_cross - psi) * psi_tangent
-    part_9 = e_l_psi * jnp.exp(phi_cross - psi) * phi_cross_tangent
-    part_10 = e_l_psi_cross * jnp.exp(psi_cross - phi) * phi_tangent
-    part_11 = jnp.exp(phi_cross - psi) * phi_cross_tangent
-    part_12 = jnp.exp(psi_cross - phi) * phi_tangent
-    part_13 = jnp.exp(phi_cross + u_psi - 2 * psi) * phi_cross_tangent
-    part_14 = jnp.exp(u_phi - phi) * phi_tangent
+    part_8 = jnp.conj(jnp.exp(phi_cross - psi)) * psi_tangent
+    part_9 = e_l_psi * jnp.conj(jnp.exp(phi_cross - psi) * phi_cross_tangent)
+    part_10 = e_l_psi_cross * jnp.exp(psi_cross - phi) * jnp.conj(phi_tangent)
+    part_11 = jnp.conj(jnp.exp(phi_cross - psi) * phi_cross_tangent)
+    part_12 = jnp.exp(psi_cross - phi) * jnp.conj(phi_tangent)
+    part_13 = jnp.exp(jnp.conj(phi_cross) + u_psi - jnp.conj(psi) - psi) * jnp.conj(phi_cross_tangent)
+    part_14 = jnp.exp(u_phi - phi) * jnp.conj(phi_tangent)
 
-    psi_gradient = (h/2 * part_5 - part_7) * part_2 + \
-                   (h/2 * part_6 - part_8) * part_1 - \
+    psi_gradient = (h/2 * part_5 - 1j * part_7) * part_2 + \
+                   jnp.conj((h/2 * part_6 - 1j * part_8)) * part_1 - \
                    (2 * part_3) * part_1 * part_2
-    phi_gradient = (h/2 * part_9 - part_11 - part_13) * part_1 + \
-                   (h/2 * part_10 - part_12 - part_14) * part_2 - \
+    phi_gradient = jnp.conj((h/2 * part_9 - 1j * part_11 - part_13)) * part_1 + \
+                   (h/2 * part_10 - 1j * part_12 - part_14) * part_2 - \
                    (2 * part_4) * part_1 * part_2
 
     psi_gradient = jnp.mean(psi_gradient)
     phi_gradient = jnp.mean(phi_gradient)
+    psi_gradient = jnp.real(psi_gradient)
+    phi_gradient = jnp.real(phi_gradient)
 
     primals_out = loss, aux_data
     device_batch_size = jnp.shape(aux_data.local_energy)[0]

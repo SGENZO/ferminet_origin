@@ -43,7 +43,7 @@ def initial_state(atoms: jnp.ndarray,
 
         m = data.size
         mean = jnp.zeros(m)
-        cov = jnp.eye(m)
+        cov = 5 * jnp.eye(m)
         
         pro_dis = multivariate_normal.pdf(data, mean, cov)
 
