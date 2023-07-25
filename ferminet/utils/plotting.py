@@ -39,4 +39,5 @@ def save_plot(path: Optional[str],
     save_name = os.path.join(path, name + '.png')
     plt.savefig(save_name)
     # plt.show()
+    plt.close()
 

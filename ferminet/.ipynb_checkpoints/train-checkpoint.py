@@ -39,6 +39,7 @@ from ferminet.utils import statistics
 from ferminet.utils import system
 from ferminet.utils import writers
 from ferminet.utils import plotting
+from ferminet.utils import curveplot
 import jax
 import jax.numpy as jnp
 import kfac_jax
@@ -716,7 +717,26 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
             atoms=atoms_to_init_mcmc,
             one_electron_moves=cfg.mcmc.one_electron,
         )
-
+        
+        if cfg.system.make_local_energy_fn:
+            local_energy_module, local_energy_fn = (
+                cfg.system.make_local_energy_fn.rsplit('.', maxsplit=1))
+            local_energy_module = importlib.import_module(local_energy_module)
+            make_local_energy = getattr(local_energy_module, local_energy_fn)  # type: hamiltonian.MakeLocalEnergy
+            local_energy = make_local_energy(
+                f=signed_network,
+                atoms=atoms,
+                charges=charges,
+                nspins=nspins,
+                use_scan=False,
+                **cfg.system.make_local_energy_kwargs)
+        else:
+            local_energy = hamiltonian.local_energy(
+                f=signed_network,
+                atoms=atoms,
+                charges=charges,
+                nspins=nspins,
+                use_scan=False)
         # 生成init loss
         initial_state = gaussian.initial_state(
             atoms=atoms,
@@ -726,6 +746,10 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
         evaluate_initial_loss = initial_loss_functions.make_loss(
             network,
             initial_state)
+        energy = comp_loss_functions.make_loss(
+            network,
+            local_energy,
+            clip_local_energy=cfg.optim.clip_el)
     
         # init optimizer学习率
         def learning_rate_schedule_init(t_: jnp.ndarray) -> jnp.ndarray:
@@ -774,6 +798,7 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
             logging.info('Completed initial state burn-in MCMC steps')
             sharded_key, subkeys = kfac_jax.utils.p_split(sharded_key)
             pmap_initial_loss = constants.pmap(evaluate_initial_loss)
+            psi_energy = constants.pmap(energy)
             initial_loss, _ = pmap_initial_loss(params_previous, subkeys, data_previous)
             logging.info('Initial loss: %03.4f (MSE)', initial_loss[0])
 
@@ -782,7 +807,7 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
         # 用于记录有数值稳定性的指数权统计量（loss的均值，方差）
         weighted_stats_init = None
         # Set up logging
-        init_train_schema = ['step', 'energy', 'ewmean', 'ewvar', 'pmove_init']
+        init_train_schema = ['step', 'energy', 'loss', 'ewmean', 'ewvar', 'pmove_init']
 
         # 生成用于记录统计数据的管理器
         if writer_manager is None:
@@ -805,6 +830,9 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
                         opt_state_previous,
                         subkeys,
                         mcmc_width_previous)
+                
+                energy_previous = psi_energy(params_previous, subkeys, data_previous)
+                energy_previous = energy_previous[0]
 
                 # due to pmean, loss, and pmove should be the same across
                 # devices.
@@ -839,7 +867,8 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
                     writer.write(
                         t,
                         step=t,
-                        energy=np.asarray(loss_previous),
+                        energy=np.asarray(energy_previous),
+                        loss=np.asarray(loss_previous),
                         ewmean=np.asarray(weighted_stats_init.mean),
                         ewvar=np.asarray(weighted_stats_init.variance),
                         pmove_init=np.asarray(pmove_previous))
@@ -866,6 +895,10 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
                            name=plot_name,
                            params=params_previous,
                            batch_network=batch_network)
+        
+        loss_plot_name = 'initial'
+        curveplot.save_lossplot(path=ckpt_save_path_previous,
+                                name=loss_plot_name)
 
     # 调用init_training,模块化进行初值训练
     init_training()
@@ -910,7 +943,7 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
     mcmc_width_ckpt_phi = None
 
     # Set up logging 这里对pmove进行了psi和phi的区分
-    train_schema = ['step', 'energy', 'ewmean', 'ewvar', 'pmove_psi', 'pmove_phi']
+    train_schema = ['step', 'energy', 'loss', 'ewmean', 'ewvar', 'pmove_psi', 'pmove_phi']
     
     # Initialisation done. We now want to have different PRNG streams on each
     # device. Shard the key over devices
@@ -1069,6 +1102,8 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
         nonlocal ckpt_save_path_phi
 
         nonlocal train_schema
+
+        nonlocal time_step
         
         writer_manager = None
 
@@ -1135,6 +1170,9 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
                         subkeys,
                         mcmc_width_psi,
                         mcmc_width_phi)
+
+                energy_psi = psi_energy(params_psi, subkeys, data_psi)
+                energy_psi = energy_psi[0]
     
                 # due to pmean, loss, and pmove should be the same across
                 # devices.
@@ -1170,12 +1208,13 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
                 # Logging
                 if t % cfg.log.stats_frequency == 0:
                     logging.info(
-                        'Step %05d: %03.4f loss, exp. variance=%03.4f, pmove_psi=%0.2f, pmove_phi=%0.2f',
-                        t, loss, weighted_stats.variance, pmove_psi, pmove_phi)
+                        'Step %05d: %03.4f E_h, %03.4f loss, exp. variance=%03.4f, pmove_psi=%0.2f, pmove_phi=%0.2f',
+                        t, energy_psi, loss, weighted_stats.variance, pmove_psi, pmove_phi)
                     writer.write(
                         t,
                         step=t,
-                        energy=np.asarray(loss),
+                        energy=np.asarray(energy_psi),
+                        loss=np.asarray(loss),
                         ewmean=np.asarray(weighted_stats.mean),
                         ewvar=np.asarray(weighted_stats.variance),
                         pmove_psi=np.asarray(pmove_psi),
@@ -1194,6 +1233,17 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
                                     opt_state_psi, mcmc_width_psi)
                     checkpoint.save(ckpt_save_path_phi, t, data_phi, params_phi,
                                     opt_state_phi, mcmc_width_phi)
+                
+                plot_path = os.path.join(ckpt_save_path, cfg.log.save_path_figure)
+                if not os.path.isdir(plot_path):
+                    os.makedirs(plot_path)
+                tt = t//100
+                plot_time = f'{time_step}_{tt}'
+                plot_name = f'time_step_{plot_time}'
+                plotting.save_plot(path=plot_path,
+                           name=plot_name,
+                           params=params_psi,
+                           batch_network=batch_network)
 
     ###################################################
 
@@ -1211,7 +1261,7 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
     restore_path_previous = os.path.join(ckpt_save_path, cfg.log.save_path_previous)
     ckpt_restore_path_previous = checkpoint.get_restore_path(restore_path_previous)
     ckpt_restore_filename_previous = (checkpoint.find_last_checkpoint(ckpt_restore_path_previous))
-    _, _, params_phi, _, _ = checkpoint.restore(ckpt_restore_filename_previous, host_batch_size)
+    _, _, params_previous, _, _ = checkpoint.restore(ckpt_restore_filename_previous, host_batch_size)
 
     wan_training()
 
@@ -1233,6 +1283,9 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
                        name=plot_name,
                        params=params_psi,
                        batch_network=batch_network)
+    loss_plot_name = f'time_step_{time_step}'    
+    curveplot.save_lossplot(path=ckpt_save_path_psi,
+                            name=loss_plot_name)
     
     # 后续训练
     timedomain_iterations = cfg.WAN_iterations
@@ -1246,31 +1299,109 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
         if not os.path.isdir(ckpt_save_path_phi):
             os.makedirs(ckpt_save_path_phi)
 
+######################################################################################################
+
         # 读取路径上层文件夹
-        restore_path_psi = os.path.join(ckpt_save_path, cfg.log.save_path_psi, f'time_step_{time_step-1}')
-        restore_path_phi = os.path.join(ckpt_save_path, cfg.log.save_path_phi, f'time_step_{time_step-1}')
+        restore_path_previous = os.path.join(ckpt_save_path, cfg.log.save_path_psi, f'time_step_{time_step-1}')
+        #restore_path_phi = os.path.join(ckpt_save_path, cfg.log.save_path_phi, f'time_step_{time_step-1}')
 
         # 生成读取路径
-        ckpt_restore_path_psi = checkpoint.get_restore_path(restore_path_psi)
-        ckpt_restore_path_phi = checkpoint.get_restore_path(restore_path_phi)
+        ckpt_restore_path_previous = checkpoint.get_restore_path(restore_path_previous)
+       # ckpt_restore_path_phi = checkpoint.get_restore_path(restore_path_phi)
 
         # 读取上次训练的ckpt
-        ckpt_restore_filename_psi = (checkpoint.find_last_checkpoint(ckpt_restore_path_psi))
-        ckpt_restore_filename_phi = (checkpoint.find_last_checkpoint(ckpt_restore_path_phi))
+        ckpt_restore_filename_previous = (checkpoint.find_last_checkpoint(ckpt_restore_path_previous))
+        #ckpt_restore_filename_phi = (checkpoint.find_last_checkpoint(ckpt_restore_path_phi))
         
-        _, data_psi, params_psi, opt_state_ckpt_psi, mcmc_width_ckpt_psi = checkpoint.restore(
-            ckpt_restore_filename_psi, host_batch_size)
-        _, data_phi, params_phi, opt_state_ckpt_phi, mcmc_width_ckpt_phi = checkpoint.restore(
-            ckpt_restore_filename_phi, host_batch_size)
+        _, _, params_previous, _, _ = checkpoint.restore(ckpt_restore_filename_previous, host_batch_size)
+        #_, data_phi, params_phi, opt_state_ckpt_phi, mcmc_width_ckpt_phi = checkpoint.restore(
+            #ckpt_restore_filename_phi, host_batch_size)
 
         # previous的和psi的是不是应该分开
-        params_previous = params_psi
+        #params_previous = params_psi
 
-        mcmc_width_psi = kfac_jax.utils.replicate_all_local_devices(mcmc_width_ckpt_psi[0])
-        mcmc_width_phi = kfac_jax.utils.replicate_all_local_devices(mcmc_width_ckpt_phi[0])
+        #mcmc_width_psi = kfac_jax.utils.replicate_all_local_devices(mcmc_width_ckpt_psi[0])
+        #mcmc_width_phi = kfac_jax.utils.replicate_all_local_devices(mcmc_width_ckpt_phi[0])
 
-        opt_state_psi = opt_state_ckpt_psi   # avoid overwriting ckpted state
-        opt_state_phi = opt_state_ckpt_phi  
+        #opt_state_psi = opt_state_ckpt_psi   # avoid overwriting ckpted state
+        #opt_state_phi = opt_state_ckpt_phi  
+#########################################################################################
+
+        key, subkey = jax.random.split(key)
+        params_psi = network_init(subkey)
+        params_psi = kfac_jax.utils.replicate_all_local_devices(params_psi)
+        key, subkey = jax.random.split(key)
+        params_phi = network_init(subkey)
+        params_phi = kfac_jax.utils.replicate_all_local_devices(params_phi)
+        # data_psi
+        logging.info('No checkpoint of psi found. Training new model for psi.')
+        subkey = jax.random.fold_in(subkey, jax.process_index())
+        data_psi = init_electrons(
+            subkey,
+            cfg.system.molecule,
+            cfg.system.electrons,
+            batch_size=host_batch_size,
+            init_width=cfg.mcmc.init_width)
+        data_psi = jnp.reshape(data_psi, data_shape + data_psi.shape[1:])
+        data_psi = kfac_jax.utils.broadcast_all_local_devices(data_psi)
+        # data_phi
+        logging.info('No checkpoint of phi found. Training new model for phi.')
+        key, subkey = jax.random.split(key)
+        # make sure data on each host is initialized differently
+        subkey = jax.random.fold_in(subkey, jax.process_index())
+        data_phi = init_electrons(
+            subkey,
+            cfg.system.molecule,
+            cfg.system.electrons,
+            batch_size=host_batch_size,
+            init_width=cfg.mcmc.init_width)
+        data_phi = jnp.reshape(data_phi, data_shape + data_phi.shape[1:])
+        data_phi = kfac_jax.utils.broadcast_all_local_devices(data_phi)
+    
+        # 初始state设置
+        opt_state_ckpt_psi = None
+        mcmc_width_ckpt_psi = None
+        opt_state_ckpt_phi = None
+        mcmc_width_ckpt_phi = None
+        
+        # Initialisation done. We now want to have different PRNG streams on each
+        # device. Shard the key over devices
+        sharded_key = kfac_jax.utils.make_different_rng_key_on_all_devices(key)
+
+        # Pretraining to match Hartree-Fock
+        sharded_key, subkeys = kfac_jax.utils.p_split(sharded_key)
+        params_psi, data_psi = pretrain.pretrain_hartree_fock(
+            params=params_psi,
+            data=data_psi,
+            batch_network=batch_network,
+            batch_orbitals=batch_orbitals,
+            network_options=network_options,
+            sharded_key=subkeys,
+            atoms=atoms,
+            electrons=cfg.system.electrons,
+            scf_approx=hartree_fock,
+            iterations=cfg.pretrain.iterations)
+        sharded_key, subkeys = kfac_jax.utils.p_split(sharded_key)
+        params_phi, data_phi = pretrain.pretrain_hartree_fock(
+            params=params_phi,
+            data=data_phi,
+            batch_network=batch_network,
+            batch_orbitals=batch_orbitals,
+            network_options=network_options,
+            sharded_key=subkeys,
+            atoms=atoms,
+            electrons=cfg.system.electrons,
+            scf_approx=hartree_fock,
+            iterations=cfg.pretrain.iterations)
+
+        opt_state_psi = jax.pmap(optimizer_psi.init)(params_psi)
+        opt_state_psi = opt_state_ckpt_psi or opt_state_psi  # avoid overwriting ckpted state
+        opt_state_phi = jax.pmap(optimizer_phi.init)(params_phi)
+        opt_state_phi = opt_state_ckpt_phi or opt_state_phi  # avoid overwriting ckpted state
+
+        # mcmc步长初始化
+        mcmc_width_psi = kfac_jax.utils.replicate_all_local_devices(jnp.asarray(cfg.mcmc.move_width))
+        mcmc_width_phi = kfac_jax.utils.replicate_all_local_devices(jnp.asarray(cfg.mcmc.move_width))
 
         pmoves_psi = np.zeros(cfg.mcmc.adapt_frequency)
         pmoves_phi = np.zeros(cfg.mcmc.adapt_frequency)
@@ -1296,5 +1427,14 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
                            name=plot_name,
                            params=params_psi,
                            batch_network=batch_network)
+        loss_plot_name = f'time_step_{time_step}'    
+        curveplot.save_lossplot(path=ckpt_save_path_psi,
+                                name=loss_plot_name)
+   
+
+
+
+
+
 
 
