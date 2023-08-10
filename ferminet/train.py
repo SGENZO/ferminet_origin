@@ -33,6 +33,7 @@ from ferminet import initial_loss as initial_loss_functions
 from ferminet import mcmc
 from ferminet import networks
 from ferminet import pretrain
+from ferminet import initial_pretrain
 from ferminet import energy as comp_loss_functions
 from ferminet.utils import multi_host
 from ferminet.utils import statistics

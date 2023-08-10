@@ -47,10 +47,10 @@ def make_loss(network: networks.LogFermiNetLike,
         
         f = batch_initial_boundary(data_previous)
         psi = batch_network(params_previous, data_previous)
-        SE = (f - psi**2) ** 2 # f是分布函数，所以与psi^2做差
+        SE = (f - psi) ** 2 # f是分布函数，所以与psi^2做差 改成直接对psi监督
         MSE = constants.pmean(jnp.mean(SE))
 
-        variance = constants.pmean(jnp.mean((SE - MSE)**2))
+        variance =constants.pmean(jnp.mean((SE - MSE)**2))
         
         return MSE, AuxiliaryInitLossData(variance=variance, squared_loss=SE)
     

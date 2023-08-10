@@ -16,7 +16,7 @@ def save_lossplot(path: Optional[str],
     energy = np.loadtxt(open(file,'rb'),delimiter=",",skiprows=1,usecols=[2])
     loss = np.loadtxt(open(file,'rb'),delimiter=",",skiprows=1,usecols=[3])
     y = energy                  
-    z = np.log10(loss)
+    z = loss
     x = range(len(energy))
 
     plt.figure()
@@ -26,13 +26,15 @@ def save_lossplot(path: Optional[str],
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
 
-    plt.xlabel('iters')    # x轴标签
+    plt.xlabel('training steps')    # x轴标签
     plt.ylabel('loss')     # y轴标签
+    plt.grid()
 	
     # 以x_train_loss为横坐标，y_train_loss为纵坐标，曲线宽度为1，实线，增加标签，训练损失，
     # 默认颜色，如果想更改颜色，可以增加参数color='red',这是红色。
-    plt.plot(x, z, linewidth=1, linestyle="solid", label="train loss")
+    plt.semilogy(x, z, linewidth=1, linestyle="solid", label="train loss")
     plt.legend()
+
     plt.title('Loss curve')
 
     save_name = os.path.join(path, name + '_loss.png')
@@ -46,12 +48,13 @@ def save_lossplot(path: Optional[str],
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
 
-    plt.xlabel('iters')    # x轴标签
+    plt.xlabel('training steps')    # x轴标签
     plt.ylabel('energy')     # y轴标签
+    plt.grad()
 	
     # 以x_train_loss为横坐标，y_train_loss为纵坐标，曲线宽度为1，实线，增加标签，训练损失，
     # 默认颜色，如果想更改颜色，可以增加参数color='red',这是红色。
-    plt.plot(x, y, linewidth=1, linestyle="solid", label="energy")
+    plt.semilogy(x, y, linewidth=1, linestyle="solid", label="energy")
     plt.legend()
     plt.title('Energy curve')
 
