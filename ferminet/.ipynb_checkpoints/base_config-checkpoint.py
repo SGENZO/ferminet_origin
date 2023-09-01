@@ -60,9 +60,15 @@ def default() -> ml_collections.ConfigDict:
           'iterations_phi': 5,  # phi的内循环步数
           'optimizer': 'adam',  # one of adam, kfac, lamb, none
           'lr': {
-              'rate': 0.05,  # learning rate
+              'rate': 5.e-3,  # learning rate
               'decay': 1.0,  # exponent of learning rate decay
-              'delay': 10000.0,  # term that sets the scale of the rate decay
+              'delay': 2500.0,  # term that sets the scale of the rate decay
+              'int_delay': 2500.0,
+          },
+          'exp_lr': {
+              'rate': 5.e-3,
+              'decay': 0.9,
+              'decay_step': 1000,
           },
           'clip_el': 5.0,  # If not none, scale at which to clip local energy
           # KFAC hyperparameters. See KFAC documentation for details.

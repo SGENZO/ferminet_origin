@@ -60,9 +60,15 @@ def default() -> ml_collections.ConfigDict:
           'iterations_phi': 5,  # phi的内循环步数
           'optimizer': 'adam',  # one of adam, kfac, lamb, none
           'lr': {
-              'rate': 0.05,  # learning rate
+              'rate': 5.e-3,  # learning rate
               'decay': 1.0,  # exponent of learning rate decay
-              'delay': 10000.0,  # term that sets the scale of the rate decay
+              'delay': 2500.0,  # term that sets the scale of the rate decay
+              'int_delay': 2500.0,
+          },
+          'exp_lr': {
+              'rate': 5.e-3,
+              'decay': 0.9,
+              'decay_step': 1000,
           },
           'clip_el': 5.0,  # If not none, scale at which to clip local energy
           # KFAC hyperparameters. See KFAC documentation for details.
@@ -153,10 +159,10 @@ def default() -> ml_collections.ConfigDict:
           # or reinitialize walkers.
           'burn_in': 100,
           'init_burn_in': 100,
-          'steps': 10,  # Number of MCMC steps to make between network updates.
+          'steps': 100,  # Number of MCMC steps to make between network updates.
           # Width of (atom-centred) Gaussian used to generate initial electron
           # configurations.
-          'init_steps': 10, #训练初值的mcmc step
+          'init_steps': 100, #训练初值的mcmc step
           'init_width': 1.0,
           # Width of Gaussian used for random moves for RMW or step size for
           # HMC.

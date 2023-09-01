@@ -50,7 +50,7 @@ def save_lossplot(path: Optional[str],
 
     plt.xlabel('training steps')    # x轴标签
     plt.ylabel('energy')     # y轴标签
-    plt.grad()
+    plt.grid()
 	
     # 以x_train_loss为横坐标，y_train_loss为纵坐标，曲线宽度为1，实线，增加标签，训练损失，
     # 默认颜色，如果想更改颜色，可以增加参数color='red',这是红色。

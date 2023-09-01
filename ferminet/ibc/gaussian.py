@@ -41,12 +41,12 @@ def initial_state(atoms: jnp.ndarray,
 
     def _i_s(data: jnp.ndarray) -> jnp.ndarray:
 
-        m = data.size
+        m = 3
         mean = jnp.zeros(m)
         cov = 5 * jnp.eye(m)
         
         pro_dis = multivariate_normal.pdf(data, mean, cov)
-        pro_dis_sq = jnp.sprt(pro_dis)
+        pro_dis_sq = jnp.sqrt(pro_dis)
 
         return pro_dis_sq
 

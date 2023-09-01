@@ -33,7 +33,7 @@ from ferminet import initial_loss as initial_loss_functions
 from ferminet import mcmc
 from ferminet import networks
 from ferminet import pretrain
-from ferminet import initial_pretrain
+#from ferminet import initial_pretrain
 from ferminet import energy as comp_loss_functions
 from ferminet.utils import multi_host
 from ferminet.utils import statistics
@@ -49,6 +49,7 @@ import numpy as np
 import optax
 from typing_extensions import Protocol
 import os
+import sys
 
 
 def init_electrons(
@@ -520,6 +521,43 @@ def make_init_training_step(
     # Optimization step
     new_params, state, loss, aux_data = optimizer_step(params, data, state,
                                                        loss_key)
+    
+    return data, new_params, state, loss, aux_data, pmove
+
+  return step
+
+def make_init_training_step_noenv(
+    mcmc_step,
+    optimizer_step: OptUpdate,
+) -> Step:
+  """Factory to create traning step for non-KFAC optimizers.
+
+  Args:
+    mcmc_step: Callable which performs the set of MCMC steps. See make_mcmc_step
+      for creating the callable.
+    optimizer_step: OptUpdate callable which evaluates the forward and backward
+      passes and updates the parameters and optimizer state, as required.
+
+  Returns:
+    step, a callable which performs a set of MCMC steps and then an optimization
+    update. See the Step protocol for details.
+  """
+  @functools.partial(constants.pmap, donate_argnums=(0, 1, 2))
+  def step(data: jnp.ndarray,
+           params: networks.ParamTree, state: Optional[optax.OptState],
+           key: chex.PRNGKey, mcmc_width: jnp.ndarray) -> StepResults:
+    """A full update iteration (except for KFAC): MCMC steps + optimization."""
+    # MCMC loop
+    mcmc_key, loss_key = jax.random.split(key, num=2)
+    data, pmove = mcmc_step(params, data, mcmc_key, mcmc_width)
+
+    # Optimization step
+    new_params, state, loss, aux_data = optimizer_step(params, data, state,
+                                                       loss_key)
+
+    # 固定envelope部分参数
+    new_params['envelope'] = params['envelope']
+    
     return data, new_params, state, loss, aux_data, pmove
 
   return step
@@ -755,7 +793,10 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
         # init optimizer学习率
         def learning_rate_schedule_init(t_: jnp.ndarray) -> jnp.ndarray:
             return cfg.optim.lr.rate * jnp.power(
-                (1.0 / (1.0 + (t_ / cfg.optim.lr.delay))), cfg.optim.lr.decay)
+                (1.0 / (1.0 + (t_ / cfg.optim.lr.int_delay))), cfg.optim.lr.decay)
+        def learning_rate_schedule_exp(t_: jnp.ndarray) -> jnp.ndarray:
+            return cfg.optim.exp_lr.rate * jnp.power(
+                cfg.optim.exp_lr.decay, (t_ / cfg.optim.exp_lr.decay_step))
 
         # 这里可以改成，多种优化器
         # Construct and setup optimizer
@@ -770,7 +811,9 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
         init_step = make_init_training_step(
             mcmc_step=init_mcmc_step,
             optimizer_step=make_init_opt_update_step(evaluate_initial_loss, optimizer_previous))
-    
+        init_step_noenv = make_init_training_step_noenv(
+            mcmc_step=init_mcmc_step,
+            optimizer_step=make_init_opt_update_step(evaluate_initial_loss, optimizer_previous))   
         # mcmc_width生成
         if mcmc_width_ckpt_previous is not None:
             mcmc_width_previous = kfac_jax.utils.replicate_all_local_devices(mcmc_width_ckpt_previous[0])
@@ -824,13 +867,22 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
             # Main training loop
             for t in range(t_init_previous, cfg.optim.init_iterations):
                 sharded_key, subkeys = kfac_jax.utils.p_split(sharded_key)
-                data_previous, params_previous, opt_state_previous, loss_previous, unused_aux_data, \
-                    pmove_previous = init_step(
-                        data_previous, 
-                        params_previous,
-                        opt_state_previous,
-                        subkeys,
-                        mcmc_width_previous)
+                if t < 2000:
+                    data_previous, params_previous, opt_state_previous, loss_previous, unused_aux_data, \
+                        pmove_previous = init_step_noenv(
+                            data_previous, 
+                            params_previous,
+                            opt_state_previous,
+                            subkeys,
+                            mcmc_width_previous)
+                else:
+                    data_previous, params_previous, opt_state_previous, loss_previous, unused_aux_data, \
+                        pmove_previous = init_step_noenv(
+                            data_previous, 
+                            params_previous,
+                            opt_state_previous,
+                            subkeys,
+                            mcmc_width_previous)
                 
                 energy_previous = psi_energy(params_previous, subkeys, data_previous)
                 energy_previous = energy_previous[0]
@@ -873,12 +925,32 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
                         ewmean=np.asarray(weighted_stats_init.mean),
                         ewvar=np.asarray(weighted_stats_init.variance),
                         pmove_init=np.asarray(pmove_previous))
-    
+                
+                # 检测nan问题，保存ckpt
+                if jnp.isnan(energy_previous) == True:
+                    checkpoint.save(ckpt_save_path_previous, t, data_previous, params_previous,
+                                    opt_state_previous, mcmc_width_previous)
+                    plot_path = os.path.join(ckpt_save_path, cfg.log.save_path_figure)
+                    if not os.path.isdir(plot_path):
+                        os.makedirs(plot_path)
+                    plot_name = 'initial_distribution'
+                    plotting.save_plot(path=plot_path,
+                                       name=plot_name,
+                                       params=params_previous,
+                                       batch_network=batch_network)
+                    
+                    loss_plot_name = 'initial'
+                    curveplot.save_lossplot(path=ckpt_save_path_previous,
+                                            name=loss_plot_name)
+                    sys.exit()
                 # Checkpointing
                 if time.time() - time_of_last_ckpt > cfg.log.save_frequency * 60:
                     checkpoint.save(ckpt_save_path_previous, t, data_previous, params_previous,
                                     opt_state_previous, mcmc_width_previous)
-                    time_of_last_ckpt = time.time()      
+                    time_of_last_ckpt = time.time()
+                if t%1000 == 0:
+                    checkpoint.save(ckpt_save_path_previous, t, data_previous, params_previous,
+                                    opt_state_previous, mcmc_width_previous)
 
         # 保存最后的ckpt
         checkpoint.save(ckpt_save_path_previous, cfg.optim.init_iterations, data_previous, params_previous,
